@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Ultimate Smooth Hand Particles</title>
+    <style>
+        body { margin: 0; background: #000; overflow: hidden; font-family: 'Segoe UI', sans-serif; }
+        #preview-container { 
+            position: absolute; bottom: 20px; left: 20px; 
+            width: 220px; height: 165px; 
+            border: 2px solid #00f2ff; border-radius: 12px; 
+            overflow: hidden; z-index: 100; box-shadow: 0 0 15px rgba(0,242,255,0.3);
+        }
+        #tracking-canvas { width: 100%; height: 100%; transform: scaleX(-1); }
+        #info { position: absolute; top: 20px; right: 20px; color: #00f2ff; text-align: right; pointer-events: none; }
+    </style>
+</head>
+<body>
+
+    <div id="info">
+        <h2 style="margin:0">NEURAL PARTICLES</h2>
+        <p id="status">Status: Initializing...</p>
+        <p>Move hand to attract | Fist to shrink</p>
+    </div>
+
+    <div id="preview-container">
+        <canvas id="tracking-canvas"></canvas>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/three@0.150.0/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+
+    <script>
+        // --- 1. SETUP THREE.JS ---
+        const scene = new THREE.Scene();
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth/window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        document.body.appendChild(renderer.domElement);
+
+        const count = 12000;
+        const geo = new THREE.BufferGeometry();
+        const positions = new Float32Array(count * 3);
+        const baseShape = new Float32Array(count * 3);
+
+        for(let i=0; i<count; i++) {
+            const theta = Math.random() * Math.PI * 2;
+            const phi = Math.acos((Math.random() * 2) - 1);
+            baseShape[i*3] = Math.sin(phi) * Math.cos(theta);
+            baseShape[i*3+1] = Math.sin(phi) * Math.sin(theta);
+            baseShape[i*3+2] = Math.cos(phi);
+        }
+        geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+        const mat = new THREE.PointsMaterial({ size: 0.035, color: 0x00f2ff, transparent: true, blending: THREE.AdditiveBlending, opacity: 0.7 });
+        const points = new THREE.Points(geo, mat);
+        scene.add(points);
+        camera.position.z = 10;
+
+        // --- 2. SMOOTHING & LOGIC ---
+        let targetX = 0, targetY = 0, targetScale = 4;
+        let curX = 0, curY = 0, curScale = 4;
+        const LERP = 0.12; // Lower = smoother
+
+        // --- 3. MEDIAPIPE HANDS ---
+        const video = document.createElement('video');
+        const tCanvas = document.getElementById('tracking-canvas');
+        const tCtx = tCanvas.getContext('2d');
+        const status = document.getElementById('status');
+
+        const hands = new Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+        hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+
+        hands.onResults(res => {
+            tCtx.save();
+            tCtx.clearRect(0,0, tCanvas.width, tCanvas.height);
+            tCtx.drawImage(res.image, 0, 0, tCanvas.width, tCanvas.height);
+
+            if (res.multiHandLandmarks && res.multiHandLandmarks.length > 0) {
+                status.innerText = "Status: Tracking Active";
+                const lm = res.multiHandLandmarks[0];
+                
+                // Draw Preview
+                drawConnectors(tCtx, lm, HAND_CONNECTIONS, {color: '#00f2ff', lineWidth: 3});
+                drawLandmarks(tCtx, lm, {color: '#ff0055', lineWidth: 1, radius: 2});
+
+                // Update Targets
+                targetX = (lm[8].x - 0.5) * -22;
+                targetY = (lm[8].y - 0.5) * -16;
+                
+                // Calculate distance for shrink (Wrist to Middle Finger)
+                const d = Math.hypot(lm[12].x - lm[0].x, lm[12].y - lm[0].y);
+                targetScale = d * 30; // Shrinks as fist closes
+            } else {
+                status.innerText = "Status: Searching for Hand...";
+                targetScale = 3; // Reset to default size when hand lost
+                targetX *= 0.95; targetY *= 0.95; // Drifts back to center
+            }
+            tCtx.restore();
+        });
+
+        const cam = new Camera(video, {
+            onFrame: async () => {
+                tCanvas.width = video.videoWidth; tCanvas.height = video.videoHeight;
+                await hands.send({image: video});
+            },
+            width: 640, height: 480
+        });
+        cam.start();
+
+        // --- 4. ANIMATION LOOP ---
+        function animate() {
+            requestAnimationFrame(animate);
+
+            // Interpolation
+            curX += (targetX - curX) * LERP;
+            curY += (targetY - curY) * LERP;
+            curScale += (targetScale - curScale) * LERP;
+
+            const posArr = geo.attributes.position.array;
+            for(let i=0; i<count; i++) {
+                const tx = baseShape[i*3] * curScale + curX;
+                const ty = baseShape[i*3+1] * curScale + curY;
+                const tz = baseShape[i*3+2] * curScale;
+
+                posArr[i*3] += (tx - posArr[i*3]) * 0.1;
+                posArr[i*3+1] += (ty - posArr[i*3+1]) * 0.1;
+                posArr[i*3+2] += (tz - posArr[i*3+2]) * 0.1;
+            }
+
+            geo.attributes.position.needsUpdate = true;
+            points.rotation.y += 0.003;
+            renderer.render(scene, camera);
+        }
+        animate();
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth/window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+    </script>
+</body>
+</html>
